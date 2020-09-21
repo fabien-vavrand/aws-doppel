@@ -1,5 +1,10 @@
 import sys
 import logging
+import pathlib
+
+
+def get_root_path():
+    return str(pathlib.Path(__file__).parent.parent)
 
 
 def console_logger():
@@ -11,4 +16,3 @@ def console_logger():
         datefmt='%Y-%m-%dT%H:%M:%S')
     )
     logger.addHandler(handler)
-

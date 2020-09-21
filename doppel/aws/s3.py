@@ -1,15 +1,16 @@
 import io
 import boto3
 import logging
+import pickle
 import datetime
 import json
-from doppel.aws import AwsClient
+from doppel.aws.__init__ import AwsClient
 
 
 class S3Client(AwsClient):
 
-    def __init__(self):
-        super().__init__('s3')
+    def __init__(self, profile_name=None):
+        super().__init__('s3', profile_name)
 
     def list_buckets(self):
         buckets = self.client.list_buckets()
@@ -39,6 +40,8 @@ class S3Bucket(AwsClient):
     def init_bucket(self):
         self.bucket = self.resource.Bucket(self.name)
         if self.bucket.creation_date is None:
+            if self.region is None:
+                raise ValueError('Bucket does not exist. Define a region to be able to create one.')
             self.logger.info('Creating bucket {}'.format(self.name))
             self.bucket = self.resource.create_bucket(Bucket=self.name,
                                                       CreateBucketConfiguration={'LocationConstraint': self.region})
@@ -125,6 +128,11 @@ class S3Bucket(AwsClient):
         obj = json.dumps(obj, default=default, indent=4)
         self.save(obj, path)
 
+    def save_pickle(self, obj, path):
+        buffer = io.BytesIO()
+        pickle.dump(obj, buffer)
+        self.save(buffer, path)
+
     def upload(self, filename, path):
         path = self._validate_path(path)
         self.bucket.upload_file(filename, path)
@@ -140,5 +148,14 @@ class S3Bucket(AwsClient):
         with self.load(path) as f:
             return json.load(f)
 
+    def load_pickle(self, path):
+        with self.load(path) as f:
+            return pickle.loads(f.getvalue())
+
     def walk(self, path):
         raise NotImplementedError()
+
+    def remove(self, path):
+        path = self._validate_path(path)
+        if self.exists(path):
+            self.bucket.delete_objects(Delete={'Objects': [{'Key': path}]})

@@ -11,7 +11,7 @@ from doppel.aws.ec2 import Ec2Client, Ec2
 from doppel.aws.s3 import S3Bucket, S3Client
 from doppel.aws.iam import IamClient, Policy
 from doppel.ssh import SshSession
-from doppel.utils import zip_dir, get_root_path
+from doppel.utils import zip_dir, get_module_path
 from doppel.core.context import DoppelContext
 
 
@@ -21,6 +21,28 @@ logging.getLogger('paramiko.transport').setLevel(logging.WARNING)
 logger = logging.getLogger('doppel')
 
 KEY = 'doppel'
+MAX_INSTANCES = 100
+
+
+class DoppelPackage:
+
+    def __init__(self, path):
+        self.path = path
+        self.exists = os.path.exists(path)
+        self.name = os.path.split(path)[1]
+        self.is_dir = os.path.isdir(path)
+        self.has_setup = self.is_dir and os.path.exists(os.path.join(path, 'setup.py'))
+        self.add_to_pythonpath = self.is_dir and not self.has_setup
+
+    def validate(self):
+        if not self.exists:
+            raise ValueError('Package path {} does not exists.'.format(self.path))
+        elif not self.is_dir:
+            raise ValueError('Package path {} should be a directory.'.format(self.path))
+        elif self.has_setup:
+            logging.info('Package {} will be pip installed using setup.py'.format(self.name))
+        else:
+            logging.info('Package {} will be added to python path'.format(self.name))
 
 
 class DoppelProject:
@@ -43,9 +65,12 @@ class DoppelProject:
         Python entry point to execute when path is passed as a directory. If path points to a python project with a
         setup.py, the entry point should be of the form -m module.module, instead of module/module.py
 
-    dependencies : list of string, default=None
-        List of packages dependencies to install on EC2 instances prior to running the code. Should not be passed when
+    requirements : list of string, default=None
+        List of dependencies to install on EC2 instances prior to running the code. Should not be passed when
         path is a project with a setup.py (and a requirements.txt).
+
+    packages : list of string, default=None
+        List of packages local path to upload and install on EC2 instances prior to running the code.
 
     env_vars : List of string, default=None
         List of environment variables to set on EC2 instances.
@@ -83,10 +108,6 @@ class DoppelProject:
         Path to an AWS key pair pem file to use instead of creating a new key pair. The file should be of the form
         <key_pair.pem>, where <key_pair> is the name of the key pair already existing on AWS.
 
-    _from_config : boolean, default=False
-        Used internally
-
-
     Examples
     --------
     >>> context = DoppelContext() \
@@ -112,7 +133,8 @@ class DoppelProject:
         src: Optional[str] = None,
         path: Optional[str] = None,
         entry_point: Optional[str] = None,
-        dependencies: Optional[List[str]] = None,
+        requirements: Optional[List[str]] = None,
+        packages: Optional[List[str]] = None,
         env_vars: Optional[Dict[str, str]] = None,
         python: Optional[str] = None,
         n_instances: Optional[int] = None,
@@ -123,15 +145,15 @@ class DoppelProject:
         min_gpu: Optional[int] = None,
         context: Optional[DoppelContext] = None,
         key_path: Optional[str] = None,
-        _from_config: bool = False
+        commands: Optional[List[str]] = None
     ):
-        self.functional_name = name
         self.name = self._format_name(name)
         self.arn = self._get_arn(name)
         self.src = src
         self.path = path
         self.entry_point = entry_point
-        self.dependencies = dependencies
+        self.packages = packages
+        self.requirements = requirements
         self.env_vars = env_vars
         self.python = python
         self.n_instances = n_instances
@@ -142,15 +164,18 @@ class DoppelProject:
         self.min_gpu = min_gpu
         self.context = context
         self.key_path = key_path
+        self.commands = commands
 
         self.file_path = path if path is not None and os.path.isfile(path) else None
         self.dir_path = path if path is not None and os.path.isdir(path) else None
-        self.has_setup = self.dir_path is not None and os.path.exists(os.path.join(self.dir_path, 'setup.py'))
 
-        if not _from_config:
-            self._validate()
-            if S3Client().bucket_exists(self.arn):
-                raise ValueError('Project already exists. Destroy the project first or choose another name.')
+        self.package = None
+        if self.dir_path is not None:
+            self.package = DoppelPackage(path)
+
+        self.doppel_packages = None
+        if self.packages is not None:
+            self.doppel_packages = [DoppelPackage(path) for path in self.packages]
 
         # Project details
         self.image_id = None
@@ -191,9 +216,6 @@ class DoppelProject:
 
         self._init_aws_clients()
 
-        if not _from_config:
-            self._save_config()
-
     @staticmethod
     def _format_name(name):
         name = ''.join([c if c.isalnum() else '-' for c in name.lower()])
@@ -206,36 +228,38 @@ class DoppelProject:
 
     def _validate(self):
         if self.src is None and self.path is None:
-            raise ValueError('You need to provide either src or path')
+            raise ValueError('You need to provide either src or path.')
         elif self.src is not None and self.path is not None:
-            raise ValueError('You can either provide one of src and path')
-        elif self.src is not None:
-            if self.entry_point is not None:
-                raise ValueError('entry_point not accepted when providing src')
-        elif self.path is not None:
-            if not os.path.exists(self.path):
-                raise FileNotFoundError('path does not exists')
+            raise ValueError('You can either provide one of src and path.')
+        elif self.src is not None and self.entry_point is not None:
+            raise ValueError('entry_point not accepted when providing src.')
+        elif self.path is not None and not os.path.exists(self.path):
+            raise FileNotFoundError('path does not exists.')
+        elif self.file_path is not None and self.entry_point is not None:
+            raise ValueError('entry_point not accepted when providing a file path.')
+        elif self.dir_path is not None and self.entry_point is None:
+            raise ValueError('entry_point needed when providing a directory path.')
 
-            if self.dir_path is not None:
-                if self.entry_point is None:
-                    raise ValueError('entry_point needed when providing a directory path')
-            else:
-                if self.entry_point is not None:
-                    raise ValueError('entry_point not accepted when providing a file path')
+        # Validate package
+        if self.package is not None:
+            self.package.validate()
 
-        if self.n_instances is not None and self.duration is not None and self.budget is not None:
-            raise ValueError('You need to provide only two of n_instances, duration and budget')
+            if self.package.has_setup and self.requirements is not None:
+                raise ValueError('You should not provide requirements when your path has a setup.py')
 
-        if self.has_setup and self.dependencies is not None:
-            raise ValueError('You should not provide dependencies when your path has a setup.py')
+        # Validate packages
+        if self.packages is not None:
+            for package in self.doppel_packages:
+                package.validate()
 
-    def _save_config(self):
+    def save(self):
         config = dict(
-            name=self.functional_name,
+            name=self.name,
             src=self.src,
             path=self.path,
             entry_point=self.entry_point,
-            dependencies=self.dependencies,
+            packages=self.packages,
+            requirements=self.requirements,
             env_vars=self.env_vars,
             python=self.python,
             n_instances=self.n_instances,
@@ -281,7 +305,7 @@ class DoppelProject:
         bucket = S3Bucket(arn)
         config = bucket.load_json('doppel.config')
         config['context'] = DoppelContext(config['context'])
-        project = cls(_from_config=True, **config)
+        project = cls(**config)
 
         status = bucket.load_json('doppel.status')
         if status['start_time'] is not None:
@@ -364,6 +388,9 @@ class DoppelProject:
         elif n_none == 3:
             self.n_instances = 1
 
+        if self.n_instances > MAX_INSTANCES:
+            raise ValueError('Reached maximum of {} instances. Increase duration or reduce budget.')
+
         if self.duration is None:
             logger.info('Running {} instances indefinitly, for {}€/hour'.format(
                 self.n_instances, self.n_instances * self.instance_price))
@@ -385,12 +412,15 @@ class DoppelProject:
         if not self.initialized:
             self.init()
 
+        self._validate()
+        # We save the project first thing to be able to easily destroy it if something goes wrong before the next save
+        self.save()
+
         self.terminated = False
         self.start_time = datetime.now()
-
         self._create_aws_resources()
         self._push_code_to_s3()
-        self._save_config()
+        self.save()
 
         instance_dns = self._start_instances(self.n_instances)
         self._configure_instances(instance_dns)
@@ -415,7 +445,7 @@ class DoppelProject:
 
     def _create_security_group(self):
         group = self.ec2.create_security_group(
-            self.group_name, 'Security for {} {}'.format(KEY, self.functional_name),
+            self.group_name, 'Security for {} {}'.format(KEY, self.name),
             tag=(KEY, self.name)
         )
         self.group_id = group['GroupId']
@@ -423,7 +453,7 @@ class DoppelProject:
 
     def _create_role(self):
         role = self.iam.create_role(self.role_name, service='ec2',
-                                    description='Role for {} {}'.format(KEY, self.functional_name),
+                                    description='Role for {} {}'.format(KEY, self.name),
                                     tag=(KEY, self.name))
         self.role_id = role['RoleId']
         self.role_arn = role['Arn']
@@ -443,14 +473,19 @@ class DoppelProject:
             zip = zip_dir(self.dir_path)
             self.bucket.save(zip, 'src.zip')
 
-        if self.dependencies is not None:
-            self.bucket.save('\n'.join(self.dependencies), 'requirements.txt')
+        if self.packages is not None:
+            for package in self.doppel_packages:
+                zip = zip_dir(package.path)
+                self.bucket.save(zip, '{}.zip'.format(package.name))
 
-        with open(os.path.join(get_root_path(), 'awslogs/awscli.conf')) as file:
+        if self.requirements is not None:
+            self.bucket.save('\n'.join(self.requirements), 'requirements.txt')
+
+        with open(os.path.join(get_module_path(), 'aws/awslogs/awscli.conf')) as file:
             aws_cli = file.read()
         aws_cli = aws_cli.format(region=self.ec2.region)
 
-        with open(os.path.join(get_root_path(), 'awslogs/awslogs.conf')) as file:
+        with open(os.path.join(get_module_path(), 'aws/awslogs/awslogs.conf')) as file:
             aws_logs = file.read()
         log_group = '{}-{}'.format(KEY, self.name)
         log_group_name = log_group
@@ -458,6 +493,14 @@ class DoppelProject:
 
         self.bucket.save(aws_cli, 'awscli.conf')
         self.bucket.save(aws_logs, 'awslogs.conf')
+
+    @staticmethod
+    def get_package_name(path, i):
+        name = os.path.split(path)[1]
+        if name == '':
+            name = 'package'
+        name = '{}-{}'.format(name, i)
+        return name
 
     def _start_instances(self, n):
         instances = self.ec2.run_spot_instances(
@@ -503,29 +546,44 @@ class DoppelProject:
             ssh.run('sudo aws s3 cp s3://{}/awslogs.conf .'.format(self.arn))
         ssh.run('sudo systemctl start awslogsd')
 
-        # Retrieve source
-        with ssh.cd(KEY):
-            if self.src is not None or self.file_path is not None:
-                ssh.run('aws s3 cp s3://{}/starter.py src/starter.py'.format(self.arn))
-            elif self.dir_path is not None:
-                ssh.run('aws s3 cp s3://{}/src.zip src.zip'.format(self.arn))
-                ssh.run('unzip src.zip -d src')
-
         # Create virtual env
         python = '' if self.python is None else '={}'.format(self.python)
         ssh.run('yes | conda create -n {} python{}'.format(KEY, python))
 
-        # Install dependencies
+        # Installing packages
+        if self.packages is not None:
+            for package in self.doppel_packages:
+                with ssh.cd(KEY):
+                    ssh.run('aws s3 cp s3://{}/{name}.zip {name}.zip'.format(self.arn, name=package.name))
+                    ssh.run('unzip {name}.zip -d {name}'.format(name=package.name))
+                if package.has_setup:
+                    with ssh.activate(KEY), ssh.cd(KEY, package.name):
+                        ssh.run('pip install .')
+
+        # Retrieve source
+        with ssh.cd(KEY):
+            if self.src is not None or self.file_path is not None:
+                ssh.run('aws s3 cp s3://{}/main.py src/main.py'.format(self.arn))
+            elif self.package is not None:
+                ssh.run('aws s3 cp s3://{}/src.zip src.zip'.format(self.arn))
+                ssh.run('unzip src.zip -d src')
+
+        # Install requirements
         with ssh.cd(KEY, 'src'), ssh.activate(KEY):
-            if self.dependencies is not None:
+            if self.requirements is not None:
                 ssh.run('aws s3 cp s3://{}/requirements.txt .'.format(self.arn))
                 ssh.run('pip install -r requirements.txt')
-            elif self.has_setup:
-                ssh.run('python setup.py install')
+            elif self.package is not None and self.package.has_setup:
+                ssh.run('pip install .')
+
+        # Run user commands
+        if self.commands is not None:
+            for command in self.commands:
+                ssh.run(command)
 
         # Run
         with ssh.activate(KEY), ssh.connection.prefix(self._export_env_vars()), ssh.cd(KEY, 'src'):
-            ssh.python(self.entry_point or 'starter.py', disown=True)
+            ssh.python(self.entry_point or 'main.py', disown=True)
 
     def _export_env_vars(self):
         if self.env_vars is None:
@@ -534,7 +592,30 @@ class DoppelProject:
             env_vars = self.env_vars.copy()
         env_vars['DOPPEL'] = 'true'
         env_vars['DOPPEL_NAME'] = self.arn
+        env_vars['DOPPEL_REGION'] = self.ec2.region
+        pythonpath = self._get_pythonpath()
+        if len(pythonpath) > 0:
+            env_vars['PYTHONPATH'] = ':'.join(pythonpath)
         return ' && '.join(['export {}={}'.format(k, v) for k, v in env_vars.items()])
+
+    def _get_pythonpath(self):
+        pythonpath = []
+        self._add_to_pythonpath(self.package, pythonpath, is_src=True)
+        if self.packages is not None:
+            [self._add_to_pythonpath(package, pythonpath, is_src=False) for package in self.doppel_packages]
+        return pythonpath
+
+    @staticmethod
+    def _add_to_pythonpath(package, pythonpath, is_src=True):
+        if package is None:
+            return
+        if package.add_to_pythonpath:
+            package_path = '/home/ec2-user/doppel/'
+            if is_src:
+                package_path += 'src'
+            else:
+                package_path += package.name
+            pythonpath.append(package_path)
 
     def status(self):
         instances = self.ec2.get_instances_by_tag(KEY, self.name)
@@ -578,7 +659,7 @@ class DoppelProject:
         self.iam.delete_instance_profile(self.instance_profile_name)
         self.iam.delete_role(self.role_name)
         self.terminated = True
-        self._save_config()
+        self.save()
 
     def destroy(self):
         self.terminate()

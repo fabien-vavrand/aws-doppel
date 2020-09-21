@@ -1,5 +1,5 @@
 import json
-from doppel.aws import AwsClient
+from doppel.aws.__init__ import AwsClient
 from doppel.aws.utils import get_tag
 from doppel.aws.sts import StsClient
 
@@ -15,8 +15,8 @@ class Policy:
 
 class IamClient(AwsClient):
 
-    def __init__(self):
-        super().__init__('iam')
+    def __init__(self, profile_name=None):
+        super().__init__('iam', profile_name)
 
     def get_user(self):
         user = self.client.get_user()['User']

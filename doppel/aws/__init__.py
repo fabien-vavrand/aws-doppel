@@ -1,3 +1,4 @@
+import os
 import logging
 import boto3
 
@@ -7,7 +8,8 @@ class AwsClient:
     def __init__(self, service, profile_name=None):
         self.service = service
         self.profile_name = profile_name
-        self.session = boto3.session.Session(profile_name=self.profile_name)
+        self.region = os.getenv('DOPPEL_REGION')
+        self.session = boto3.session.Session(profile_name=self.profile_name, region_name=self.region)
         self.region = self.session.region_name
         self.client = boto3.client(self.service, region_name=self.region)
         try:

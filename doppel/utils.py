@@ -3,8 +3,8 @@ import zipfile
 import pathlib
 
 
-def get_root_path():
-    return str(pathlib.Path(__file__).parent.parent)
+def get_module_path():
+    return str(pathlib.Path(__file__).parent)
 
 
 def zip_dir(path):

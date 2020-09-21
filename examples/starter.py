@@ -4,7 +4,7 @@ import datetime
 import time
 import pandas as pd
 
-from doppel.core.context import DoppelContext
+from doppel import DoppelContext
 
 context = DoppelContext()
 context.add_data(key='titanic.csv', bucket='doppel-project-data', source=r'C:\data\titanic\train.csv')

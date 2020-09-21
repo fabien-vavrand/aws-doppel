@@ -3,7 +3,7 @@ from retry import retry
 import pandas as pd
 from datetime import datetime, timedelta
 
-from doppel.aws import AwsClient
+from doppel.aws.__init__ import AwsClient
 from doppel.aws.utils import get_list_param, get_next_token, get_my_ip, get_filters, get_tag
 
 
@@ -24,8 +24,8 @@ class Ec2:
 
 class Ec2Client(AwsClient):
 
-    def __init__(self):
-        super().__init__('ec2')
+    def __init__(self, profile_name=None):
+        super().__init__('ec2', profile_name)
 
     def get_regions(self):
         return self.client.describe_regions()['Regions']

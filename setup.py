@@ -2,14 +2,10 @@ from setuptools import setup, find_packages
 from distutils.util import convert_path
 
 
-packages = find_packages()
-module = packages[0]
-
-
-meta_ns = {}
-meta_path = convert_path(module + '/__meta__.py')
+meta = {}
+meta_path = convert_path('doppel/__meta__.py')
 with open(meta_path) as meta_file:
-    exec(meta_file.read(), meta_ns)
+    exec(meta_file.read(), meta)
 
 
 def parse_requirements(file):
@@ -19,11 +15,15 @@ def parse_requirements(file):
 
 
 setup(
-    name=meta_ns['__name__'],
-    version=meta_ns['__version__'],
-    author=meta_ns['__author__'],
-    license=meta_ns['__license__'],
-    classifiers=meta_ns['__classifiers__'],
+    name=meta['__name__'],
+    packages=find_packages(exclude=["tests"]),
+    version=meta['__version__'],
+    author=meta['__author__'],
+    license=meta['__license__'],
+    classifiers=meta['__classifiers__'],
     setup_requires=['setuptools', 'wheel'],
-    install_requires=parse_requirements('requirements.txt')
+    install_requires=parse_requirements('requirements.txt'),
+    package_data={
+        'doppel.aws': ['awslogs/*.conf']
+    }
 )
