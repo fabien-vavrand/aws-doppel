@@ -9,6 +9,7 @@ class Policy:
     ADMINISTRATOR = 'AdministratorAccess'
     EC2 = 'AmazonEC2FullAccess'
     S3 = 'AmazonS3FullAccess'
+    IAM = 'IAMFullAccess'
     CLOUD_WATCH = 'CloudWatchFullAccess'
     CODE_DEPLOY = 'AWSCodeDeployFullAccess'
 

@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import pickle
 import logging
 from typing import Dict, Optional
 from doppel.aws.s3 import S3Bucket
@@ -12,6 +13,7 @@ class DoppelContext:
         self.data = data if data is not None else {}
         self.is_doppel = os.getenv('DOPPEL') is not None
         self.doppel_name = os.getenv('DOPPEL_NAME')
+        self.doppel_arn = os.getenv('DOPPEL_ARN')
         self._validate()
 
     def _validate(self):
@@ -29,10 +31,16 @@ class DoppelContext:
         self.data[key] = data
         return self
 
-    def data_path(self, key):
+    def data_path(self, key=None):
         if self.is_doppel:
-            return os.path.join('/home/ec2-user/doppel/data/{}'.format(key))
+            path = '/home/ec2-user/doppel/data'
+            if key:
+                return '{}/{}'.format(path, key)
+            else:
+                return path
         else:
+            if key is None:
+                raise ValueError('key should not be null when running locally')
             if key not in self.data:
                 raise ValueError('key {} is missing in data'.format(key))
             if 'source' not in self.data[key]:
@@ -47,15 +55,26 @@ class DoppelContext:
                     logging.info('Uploading {} to {}'.format(key, data['bucket']))
                     bucket.upload(data['source'], key)
 
-    def save_json(self, obj, doppel_path, local_path):
+    def save(self, obj, doppel_path, local_path=None):
         if self.is_doppel:
-            S3Bucket(self.doppel_name).save_json(obj, doppel_path)
-        else:
+            S3Bucket(self.doppel_arn).save(obj, doppel_path)
+        elif local_path:
+            with open(local_path, 'wb') as file:
+                file.write(obj.getvalue())
+
+    def save_json(self, obj, doppel_path, local_path=None):
+        if self.is_doppel:
+            S3Bucket(self.doppel_arn).save_json(obj, doppel_path)
+        elif local_path:
             with open(local_path, 'w') as file:
                 json.dump(obj, file, indent=4)
 
-    def save_pickle(self, obj, doppel_path, local_path):
-        raise NotImplementedError()
+    def save_pickle(self, obj, doppel_path, local_path=None):
+        if self.is_doppel:
+            S3Bucket(self.doppel_arn).save_pickle(obj, doppel_path)
+        elif local_path:
+            with open(local_path, 'wb') as file:
+                pickle.dump(obj, file)
 
     def get_logger(self, name=None):
         logger = logging.getLogger(name)
@@ -66,5 +85,8 @@ class DoppelContext:
         else:
             handler = logging.StreamHandler(stream=sys.stdout)
 
+        LOGGING_FORMAT = '%(asctime)-15s %(name)-15s %(levelname)-8s %(message)s'
+        DATE_FORMAT = '%Y-%m-%dT%H:%M:%S'
+        handler.setFormatter(logging.Formatter(fmt=LOGGING_FORMAT, datefmt=DATE_FORMAT))
         logger.addHandler(handler)
         return logger

@@ -40,9 +40,9 @@ class DoppelPackage:
         elif not self.is_dir:
             raise ValueError('Package path {} should be a directory.'.format(self.path))
         elif self.has_setup:
-            logging.info('Package {} will be pip installed using setup.py'.format(self.name))
+            logger.info('Package {} will be pip installed using setup.py'.format(self.name))
         else:
-            logging.info('Package {} will be added to python path'.format(self.name))
+            logger.info('Package {} will be added to python path'.format(self.name))
 
 
 class DoppelProject:
@@ -457,7 +457,9 @@ class DoppelProject:
                                     tag=(KEY, self.name))
         self.role_id = role['RoleId']
         self.role_arn = role['Arn']
+        self.iam.attach_role_policy(self.role_name, Policy.EC2)
         self.iam.attach_role_policy(self.role_name, Policy.S3)
+        self.iam.attach_role_policy(self.role_name, Policy.IAM)
         self.iam.attach_role_policy(self.role_name, Policy.CLOUD_WATCH)
 
     def _create_instance_profile(self):
@@ -531,11 +533,6 @@ class DoppelProject:
             ssh.mkdir('src')
             ssh.run("echo \"Instance started\" > logs")
 
-        if self.context is not None:
-            with ssh.cd(KEY, 'data'):
-                for key, data in self.context.data.items():
-                    ssh.run('aws s3 cp s3://{}/{} .'.format(data['bucket'], key))
-
         # Update
         # ssh.run('sudo yum -y update')
 
@@ -546,13 +543,22 @@ class DoppelProject:
             ssh.run('sudo aws s3 cp s3://{}/awslogs.conf .'.format(self.arn))
         ssh.run('sudo systemctl start awslogsd')
 
+        # Downloading data
+        if self.context is not None:
+            for key, data in self.context.data.items():
+                self._log(ssh, f'Downloading {key}')
+                with ssh.cd(KEY, 'data'):
+                    ssh.run('aws s3 cp s3://{}/{} .'.format(data['bucket'], key))
+
         # Create virtual env
+        self._log(ssh, 'Creating virtual env')
         python = '' if self.python is None else '={}'.format(self.python)
         ssh.run('yes | conda create -n {} python{}'.format(KEY, python))
 
         # Installing packages
         if self.packages is not None:
             for package in self.doppel_packages:
+                self._log(ssh, f'Installing package {package.name}')
                 with ssh.cd(KEY):
                     ssh.run('aws s3 cp s3://{}/{name}.zip {name}.zip'.format(self.arn, name=package.name))
                     ssh.run('unzip {name}.zip -d {name}'.format(name=package.name))
@@ -561,6 +567,7 @@ class DoppelProject:
                         ssh.run('pip install .')
 
         # Retrieve source
+        self._log(ssh, 'Installing source')
         with ssh.cd(KEY):
             if self.src is not None or self.file_path is not None:
                 ssh.run('aws s3 cp s3://{}/main.py src/main.py'.format(self.arn))
@@ -582,8 +589,13 @@ class DoppelProject:
                 ssh.run(command)
 
         # Run
+        self._log(ssh, 'Starting')
         with ssh.activate(KEY), ssh.connection.prefix(self._export_env_vars()), ssh.cd(KEY, 'src'):
             ssh.python(self.entry_point or 'main.py', disown=True)
+
+    def _log(self, ssh, message):
+        with ssh.cd(KEY):
+            ssh.run(f"echo \"{message}\" >> logs")
 
     def _export_env_vars(self):
         if self.env_vars is None:
@@ -591,7 +603,8 @@ class DoppelProject:
         else:
             env_vars = self.env_vars.copy()
         env_vars['DOPPEL'] = 'true'
-        env_vars['DOPPEL_NAME'] = self.arn
+        env_vars['DOPPEL_NAME'] = self.name
+        env_vars['DOPPEL_ARN'] = self.arn
         env_vars['DOPPEL_REGION'] = self.ec2.region
         pythonpath = self._get_pythonpath()
         if len(pythonpath) > 0:
