@@ -1,3 +1,4 @@
+import time
 from doppel.aws.s3 import S3Client, S3Bucket
 from doppel.core.project import DoppelProject
 
@@ -23,3 +24,10 @@ def destroy_all_projects():
     for bucket_name, status in iterate_projects():
         project = DoppelProject.load(status['name'])
         project.destroy()
+
+
+def terminate(context, wait=10):
+    if context.is_doppel:
+        # Wait to ensure last logs have been retrieved by the AWS logs service
+        time.sleep(wait)
+        DoppelProject(context.doppel_name).terminate()
