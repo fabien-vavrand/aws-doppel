@@ -92,6 +92,7 @@ class Ec2Client(AwsClient):
 
     def run_spot_instances(self, ami_id, instance_type, availability_zone, key_name, group_name, instance_profile_arn,
                            n_instances=1, tag=None):
+
         instances = self.client.run_instances(
             InstanceType=instance_type,
             ImageId=ami_id,

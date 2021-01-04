@@ -352,6 +352,10 @@ class DoppelProject:
         prices = self.ec2.get_spot_prices(products_description=self.platform_details)
         instances = pd.merge(instances, prices, on=Ec2.INSTANCE_TYPE)
         instances = instances.sort_values(Ec2.SPOT_PRICE)
+
+        if len(instances) == 0:
+            raise ValueError('No instance matches minimum requirements')
+
         instance = instances.iloc[[0]].to_dict(orient='records')[0]
 
         self.instance_type = instance[Ec2.INSTANCE_TYPE]

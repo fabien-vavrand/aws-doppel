@@ -1,9 +1,13 @@
 import io
-import boto3
-import logging
-import pickle
-import datetime
 import json
+import boto3
+import pickle
+import zipfile
+import logging
+import datetime
+import threading
+
+from boto3.s3.transfer import TransferConfig, MB
 from doppel.aws.__init__ import AwsClient
 
 
@@ -147,9 +151,13 @@ class S3Bucket(AwsClient):
         obj = json.dumps(obj, default=default, indent=4)
         self.save(obj, path)
 
-    def save_pickle(self, obj, path):
+    def save_pickle(self, obj, path, zip=False):
         buffer = io.BytesIO()
-        pickle.dump(obj, buffer)
+        if not zip:
+            pickle.dump(obj, buffer, protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zip:
+                zip.writestr('object.pkl', pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
         self.save(buffer, path)
 
     def upload(self, filename, path):
@@ -167,9 +175,13 @@ class S3Bucket(AwsClient):
         with self.load(path) as f:
             return json.load(f)
 
-    def load_pickle(self, path):
-        with self.load(path) as f:
-            return pickle.loads(f.getvalue())
+    def load_pickle(self, path, zip=False):
+        buffer = self.load(path)
+        if not zip:
+            return pickle.loads(buffer.getvalue())
+        else:
+            with zipfile.ZipFile(buffer, 'r') as zip:
+                return pickle.loads(zip.read('object.pkl'))
 
     def walk(self, path):
         raise NotImplementedError()
@@ -178,3 +190,49 @@ class S3Bucket(AwsClient):
         path = self._validate_path(path)
         if self.exists(path):
             self.bucket.delete_objects(Delete={'Objects': [{'Key': path}]})
+
+    def save_multiparts(self, buffer, path):
+        buffer.seek(0)
+        path = self._validate_path(path)
+        config = TransferConfig(
+            multipart_threshold=100 * MB,
+            multipart_chunksize=100 * MB,
+            max_concurrency=10,
+            use_threads=True
+        )
+        self.client.upload_fileobj(
+            Fileobj=buffer,
+            Bucket=self.name,
+            Key=path,
+            Config=config
+            #Callback=ProgressPercentage(path, size=buffer.__sizeof__())
+        )
+
+    def save_pickle_multiparts(self, obj, path):
+        buffer = io.BytesIO()
+        pickle.dump(obj, buffer, protocol=pickle.HIGHEST_PROTOCOL)
+        self.save_multiparts(buffer, path)
+
+
+class ProgressPercentage(object):
+
+    def __init__(self, name, size=None):
+        self.name = name
+        self.size = size
+        self.uploaded = 0
+        self.percent = 0
+        self.lock = threading.Lock()
+        self.logger = logging.getLogger('aws-upload')
+
+    def __call__(self, bytes_amount):
+        # To simplify we'll assume this is hooked up
+        # to a single filename.
+        with self.lock:
+            self.uploaded += bytes_amount
+            if self.size is None:
+                self.logger.info('Uploaded {} bytes of {}'.format(self.uploaded, self.name))
+            else:
+                percent = int(self.uploaded / self.size * 100)
+                if percent > self.percent:
+                    self.percent = percent
+                    self.logger.info('Uploaded {}% of {}'.format(self.percent, self.name))

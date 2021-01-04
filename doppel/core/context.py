@@ -1,7 +1,9 @@
 import os
+import io
 import sys
 import json
 import pickle
+import zipfile
 import logging
 from typing import Dict, Optional
 from doppel.aws.s3 import S3Bucket
@@ -69,12 +71,18 @@ class DoppelContext:
             with open(local_path, 'w') as file:
                 json.dump(obj, file, indent=4)
 
-    def save_pickle(self, obj, doppel_path, local_path=None):
+    def save_pickle(self, obj, doppel_path, local_path=None, zip=False):
         if self.is_doppel:
-            S3Bucket(self.doppel_arn).save_pickle(obj, doppel_path)
+            S3Bucket(self.doppel_arn).save_pickle(obj, doppel_path, zip=zip)
         elif local_path:
+            buffer = io.BytesIO()
+            if not zip:
+                buffer = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+            else:
+                with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zip:
+                    zip.writestr('object.pkl', pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
             with open(local_path, 'wb') as file:
-                pickle.dump(obj, file)
+                file.write(buffer.getvalue())
 
     def get_logger(self, name=None):
         logger = logging.getLogger(name)
